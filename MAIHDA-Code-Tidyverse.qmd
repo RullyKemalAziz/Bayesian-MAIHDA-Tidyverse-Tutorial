@@ -1,0 +1,1256 @@
+---
+format:
+  html:
+    toc: true
+editor: visual
+---
+
+This document is a `tidyverse` translation of the code tutorial accompanying the MAIHDA methodological paper by [Evans et al. 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11059336/). It is intended to be read alongside the published paper. For reference, the [original tutorial code](https://osf.io/dtvc3/files/xvtu6) is also available for comparison.
+
+2 outcomes are going to be demonstrated here, continuous HbA1c data for linear regression MAIHDA, and binary diabetic status for the logistic MAIHDA.
+
+This data are based on the original NESARC data:
+
+> The original NESARC was a longitudinal study begun in 2001 by the U.S. National Institute on Alcohol Abuse and Alcoholism, and it was designed to survey a representative sample of the U.S. non-incarcerated civilian population, including citizens and non-citizens, aged 18 years and older who were currently residing in the U.S. Wave 2 data was collected between 2004 and 2005.
+
+These are the strata that we will be dealing with:
+
+> Following the construction of strata used by Evans et al. (2018), we defined 384 possible intersectional strata (=2 sex/gender categories × 3 race/ethnicity categories × 4 education categories × 4 income categories × 4 age categories) with a total of N = 33,000 individuals. For realism, we simulated some strata to be very small (e.g., N \< 10) while others are substantially larger.
+
+::: callout-note
+
+**A note on formatting:** Throughout this document, you will see highlighted callout boxes following code chunks. These contain methodological notes, `tidyverse` optimization, or my own personal insights regarding the specific workflow or pipeline used in that chunk.
+
+:::
+
+# The Data
+
+Before we begin, note that for consistency with modern `tidyverse` conventions, the primary dataframe referred to as `tut` in the original Evans code has been renamed to `d` throughout this document.
+
+Let's load the packages:
+
+```{r}
+#| message: false
+knitr::opts_chunk$set(cache = TRUE)
+
+# these are the packages from Evans original code tutorial that I use
+library(haven)
+library(tidyverse)
+library(bayesplot)
+library(brms)
+library(tidybayes)
+library(labelled)
+
+# these packages are additional packages to be used in this tutorial
+library(flextable)
+library(patchwork)
+library(rstan)
+```
+
+Load the simulated data,
+
+```{r}
+d <- read_dta("TutorialData.dta")
+```
+
+```{r}
+glimpse(d)
+```
+
+- HbA1c is in mmol / mol for each individual.
+
+- Simulated data contained realistic features of:
+
+  - meaningful between stratum inequities,
+
+  - large within-stratum-between-individual variance,
+
+  - realistic distributions of individuals across the strata and the variables use to construct them.
+
+- The `diabetic` variable is dichotomized from values ≥ 48 mmol/mol indicative of a ‘diabetic range’ (Kaiafa et al., 2021).
+
+Furthermore this is how the variables are coded:
+
+- Sex: 1 = Male; 2 = Female,
+
+- Race: 1 = white non-Hispanic; 2 = Black non-Hispanic; 3 = Hispanic or Latinx,
+
+- Education: 1 = Less than high school; 2 = Completed high school or equivalent; 3 = Some college but no degree; 4 = College degree or more,
+
+- Income: 1 = Low income (below 100% of the Federal Poverty Level, FPL, in 2000); 2 = Low-middle income (100%–199% FPL), 3 = High-middle income (200%–399% FPL); 4 = High income (400% or more of the FPL),
+
+- Age: 1 = age 18–29 years; 2 = age 30–44 years; 3 = age 45–59 years; 4 = age 60+ years.
+
+## Constructing the strata ID
+
+As Evans noted:
+
+> Selecting which axes of marginalization or inequality to examine in an intersectional analysis (e.g., age, gender, race/ethnicity, income, sexual orientation, disability) should be based on both theoretical and practical considerations.
+
+Theoretical considerations includes:
+
+- What are the major axes of marginalization and/or inequality experienced by this population, and in particular, what may be relevant to the outcome of interest?
+
+- **From prior research**, What has prior research shown to be important?
+
+Practical considerations include:
+
+- **What the data have**, What axes of marginalization/inequality were actually measured in this data set?
+
+- What is the quality of those measures?
+
+- How were responses coded. Here like `education` 4 lvls and so on. It's important here because if you collapse some, it will change the J total levels you have, and variation will change because it has to move somewhere when categories are collapsed, which then might change the VPC altogether.
+
+- How large is the sample and how is the sample distributed across possible strata definitions? This is probably the levels with small n concern, which make sense if you have a bunch of strata, the levels will explode.
+
+Here is a paragraph that ilustrate better the 3rd bullet points from the paper:
+
+> There are many choices to be made when preparing the variables. For instance, income, education, and age may be provided either continuously or with far more categorical levels than presented here. Decisions about what cutoff values to use or which levels to (re)combine should be supported by theory. However, there is a balance between the ideal set up and practical modeling and data limitations. For instance, using eighteen categories for income would create many small strata after intersecting income with race/ethnicity. While MAIHDA can manage small strata better than some other approaches, it does not entirely avoid the small N problem. In this case, including eighteen income levels would be more granular than is desirable (or needed). As discussed by Evans et al. (2018), the categorizations defined above balance issues of substantive interest with practical data limitations to arrive at a reasonable sample size for most strata.
+
+So although you might want to refer to the theory, you should also balance between meaningful result, and practical modelling decisions.
+
+Next this passage is also important, since you don't want empty / small n cells:
+
+> After provisionally selecting the axes and categories to be included, it is important to consider how well the data available is distributed across all of the possible intersectional strata. For example, unless a survey intentionally oversamples from some minoritized populations (e.g., transgender or non-binary individuals), there may be too few respondents in these categories and this situation will render many strata small or empty after combining with other axes, such as race/ethnicity or class. While it is always desirous to include minoritized populations, data limitations may restrict the axes or categories that are able to be analyzed. When using large population databases with millions of respondents, as in Persmark et al.’s analysis of the Swedish registries (Persmark, Wemrell, Zettermark, et al., 2019), small strata may be less frequent but the available measures of minoritized identities may be more limited. These factors should be considered in the selection of data to work with and in the final specification of strata definitions.
+
+Now let's generate the stratum ID
+
+```{r}
+d$stratum <- 10000*d$sex + 1000*d$race + 100*d$education + 
+  10*d$income + 1*d$age
+
+head(d$stratum)
+```
+
+What this does is that it creates number by the order of the category: position 1 = sex, position 2 = race/ethnicity, position 3 = education, position 4 = income, and position 5 = age. For the example stratum mentioned above (“Female, Hispanic, Some college, High income, 30–44 years”), this would result in the five-digit ID code: 23342.
+
+Let's convert those stratum as factor:
+
+```{r}
+d$stratum <- as.factor(d$stratum)
+
+glimpse(d)
+```
+
+```{r}
+d <- unlabelled(d)
+
+glimpse(d)
+```
+
+::: callout-note
+
+The function `unlabelled(d)` is to put label back from a stata file, in the file it is coded as integers the categories and stata put the label elsewhere or something as metadata. This function returns back that and put in the cells the labels.
+
+:::
+
+Let's order the stratum and tabulate, I will explain the tabulation tips afterwards:
+
+```{r}
+d <- d[order(d$stratum),]
+```
+
+```{r}
+table(d$stratum)
+```
+
+Okay so above is the frequency tabulation to check if each stratum has adequate sample size.
+
+> One useful way to determine whether the sample size is adequate in most intersections is to examine the number of respondents in each stratum using frequency tabulations.
+
+But it's hard to read when you have so many levels of stratum, In that case, it can be helpful to determine: What percent of the strata have X or more respondents? Where X = 10, 20, 30, 50 and 100+ respondents. We can resort to summary table, let's first make a column `strataN` which is the number of individuals belonging to a stratum, then we will make it with `flextable` the summary table.
+
+```{r}
+d <- d |> 
+  group_by(stratum) |> 
+  mutate(strataN = n()) |> 
+  ungroup()
+
+glimpse(d)
+```
+
+```{r}
+d$strataN |> range()
+```
+
+```{r}
+#| message: false
+#| label: table2
+
+strata_n <- d |> 
+  count(stratum, name = "strataN")
+
+tibble(threshold = c(100, 50, 30, 20, 10)) |> 
+  mutate(`Sample Size Per Stratum` = str_c(threshold, " or More"),
+         `Number of Strata`        = map_int(.x = threshold, .f = function(x) sum(strata_n$strataN >= x))) |> 
+  bind_rows(tibble(`Sample Size Per Stratum` = "Less than 10",
+                   `Number of Strata`        = sum(strata_n$strataN < 10))) |> 
+  mutate(`% of Strata` = round(100 * `Number of Strata` / nrow(strata_n), 1)) |> 
+  dplyr::select(-threshold) |> 
+  flextable() |> 
+  width(width = c(2.2, 1.5, 1.2)) |> 
+  add_header_lines(str_c("Sample size of intersectional strata (n = ", nrow(strata_n), ")"))
+```
+
+As you can see in the tabulation and in the summary table, we have some strata with less than 10, that make up about 9.6% of the strata.
+
+# Estimation Approach
+
+## Estimate linear model 1A (The Null Model)
+
+It's time to fit the model, first fitting the null model, Evans uses default prior of `brms`,
+
+```{r}
+model1A_f <- brmsformula(formula = HbA1c ~ (1|stratum))
+
+model1A_prior <- get_prior(formula = model1A_f, 
+                           data = d,
+                           family = gaussian)
+model1A_prior
+```
+
+::: callout-warning
+
+**Computational Note:** These models were fit using 8 cores and 8 chains on a high-performance machine. If you are running this code on a standard laptop and you want to fit the models yourself, you may need to change `cores = 4` and `chains = 4` to avoid overloading your CPU. Please note that reducing the number of chains will proportionally decrease the total number of post-warmup draws (from 8,000 to 4,000), which may slightly alter the ESS (Effective Sample Size).
+
+Alternatively, you can use the cached rds files by putting the `fits` folder inside your quarto working directory so you don't have to re-run the MCMC in your machine (the models take quite some time to fit anyway).
+
+:::
+
+```{r}
+model1A <- brm(                  
+  data = d, 
+  family = gaussian,
+  formula = model1A_f, 
+  prior = model1A_prior,
+  iter = 2000, warmup = 1000, chains = 8, cores = 8,
+  seed = 7,
+  backend = "cmdstanr",
+  file = "./model1A")        
+```
+
+```{r}
+print(model1A)
+```
+
+As Evans noted in the original code tutorial:
+
+> - This produces a model output showing the level 2 standard deviation.
+>
+> - and the same for level 1 (labelled "sd(Intercept)" and "sigma", respectively).
+>
+> - It would be sensible to check the Effective Sample Size (ESS) values of the parameters in our model - these should be over 400 for all parameters; if they aren't, we would want to increase the number of iterations.
+>
+> - We should also visually inspect the chains, to ensure there isn't any trending and the chains are mixing well.
+
+So the minimum for the ESS is 400 as per Evans, but here I will target something closer to 1k. We will also inspect the chains,
+
+```{r}
+#| message: false
+#| warning: false
+
+as_draws_df(model1A) |> 
+  mcmc_trace(pars = vars(b_Intercept:sigma),
+             facet_args = list(ncol = 1), 
+             linewidth = 0.15)
+```
+
+chain and rhat looks good now, the other parameters might look oversampled, but it seems that `b_Intercept` needs a lot of total post-warm up samples it seems, otherwise it will have low ESS.
+
+We will now use `fitted()` to predict the median outcome for each stratum, estimated median absolute deviation and 95% credible interval, and then let's add it back to `d`, following Evans workflow from the original code tutorial.
+
+```{r}
+nd <- distinct(d, stratum, sex, race, education, income, age)
+
+model1A_pred <- fitted(model1A, 
+                       newdata = nd, 
+                       robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+
+d <- left_join(d, model1A_pred |> transmute(stratum, m1Am = Estimate), by = "stratum")
+```
+
+```{r}
+glimpse(d)
+```
+
+::: callout-note
+In the original code, Evans passes the entire 33,000-row dataset to the `fitted()` function. This means brms redundantly calculates the exact same predicted values for every individual within a stratum. To make this more computationally efficient, we use `distinct()` to compute the predictions only once per unique stratum, and then `left_join()` those values back to the main dataset.
+:::
+
+## Estimate Linear model 1B (with predictors in)
+
+```{r}
+model1B_f <- brmsformula(formula = HbA1c ~ sex + race + education + income + age + (1|stratum))
+
+model1B_prior <- get_prior(formula = model1B_f, 
+                           data = d,
+                           family = gaussian)
+model1B_prior
+```
+
+```{r}
+model1B <- brm(                  
+  data = d, 
+  family = gaussian,
+  formula = model1B_f, 
+  prior = model1B_prior,
+  iter = 2000, warmup = 1000, chains = 8, cores = 8,
+  seed = 7,
+  backend = "cmdstanr",
+  file = "./model1B")        
+```
+
+```{r}
+print(model1B)
+```
+
+Let's calculate the predicted value with `fitted()` again, like before.
+
+```{r}
+# nd was defined earlier if you recall
+
+m1Bm_pred <- fitted(model1B, newdata = nd, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+
+glimpse(m1Bm_pred)
+```
+
+Let's also create ranef object, this contains only the random effect.
+
+```{r}
+m1Bu <- ranef(model1B, robust = TRUE)
+```
+
+## Estimate Logistic model 2A (null)
+
+Let's create the formula and priors objects, just like previous model:
+
+```{r}
+model2A_f <- brmsformula(formula = diabetic | trials(1) ~ (1|stratum))
+
+model2A_prior <- get_prior(formula = model2A_f, 
+                           data = d,
+                           family = binomial("logit"))
+model2A_prior
+```
+
+```{r}
+model2A <- brm(                  
+  data = d, 
+  family = binomial,
+  formula = model2A_f, 
+  prior = model2A_prior,
+  iter = 2000, warmup = 1000, chains = 8, cores = 8,
+  seed = 7,
+  backend = "cmdstanr",
+  file = "./model2A")
+```
+
+```{r}
+print(model2A)
+```
+
+Again, let's make objects of the predicted values of the models we've just fitted, and add to data set `d` like Evans did:
+
+```{r}
+m2Axbu_pred <- fitted(model2A, newdata = nd, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+
+m2Axb_pred <- fitted(model2A, newdata = nd, re_formula = NA, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+
+# join the estimate to d like she did before in the null model
+d <- d |> 
+  dplyr::select(-any_of(c("m2Axbu_est", "m2Axb_est"))) |> 
+  left_join(m2Axbu_pred |> transmute(stratum, m2Axbu_est = Estimate), by = "stratum") |> 
+  left_join(m2Axb_pred  |> transmute(stratum, m2Axb_est  = Estimate), by = "stratum")
+
+glimpse(d)
+```
+
+::: callout-note
+
+There's a lot of objects at this point, let's remind ourselves what are those 2 objects we've just added are:
+
+- `m2Axbu_pred` contains the stratum-specific predictions from the null model, which incorporate both the fixed intercept and the random stratum effects.
+
+- `m2Axb_pred` omits the random effects (using re_formula = NA) to generate the population-level null probability. This serves as a baseline for computing the AUC. In MAIHDA, a high VPC indicates substantial between-stratum heterogeneity, but the AUC is needed to determine if stratum membership actually improves predictive accuracy for the individual outcome.
+
+- also the `select()` line is to explicitly remove if there's existing columns with these names before the `left_join()` and `transmute()` pipeline, just a guardrail agianst bugs.
+
+:::
+
+## Estimate Logistic model 2B (with predictors)
+
+As always, let's define the formula and priors first.
+
+```{r}
+model2B_f <- brmsformula(formula = diabetic | trials(1) ~ sex + race + education + income + age + (1|stratum))
+```
+
+For the priors Evans assigned $\operatorname{Normal}(0, 1)$ for the class `b` and default for others, here is the default prior:
+
+```{r}
+get_prior(formula = model2B_f, 
+          data = d,
+          family = binomial)
+```
+
+```{r}
+model2B <- brm(                  
+  data = d, 
+  family = binomial,
+  formula = model2B_f, 
+  prior = prior(normal(0, 1), class = "b"),
+  iter = 2000, warmup = 1000, chains = 8, cores = 8,
+  seed = 7,
+  backend = "cmdstanr",
+  file = "./model2B")
+```
+
+```{r}
+print(model2B)
+```
+
+Similar to the null model, we generate two sets of predictions here: the stratum-specific predictions (including random effects) and the population-level predictions (omitting random effects via re_formula = NA) to serve as a baseline for the AUC.
+
+```{r}
+m2Bm <- fitted(model2B, newdata = nd, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+
+m2Bmf <- fitted(model2B, newdata = nd, re_formula = NA, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+```
+
+Let's join the 2 objects we've just made to `d`, these will be used in computing AUC later on.
+
+```{r}
+# join the 2B predictions to d for the per-individual AUC later
+d <- d |> 
+  left_join(m2Bm  |> transmute(stratum, m2Bm_est  = Estimate), by = "stratum") |> 
+  left_join(m2Bmf |> transmute(stratum, m2Bmf_est = Estimate), by = "stratum")
+```
+
+```{r}
+m2Bm_log <- fitted(model2B, scale = "linear", newdata = nd, re_formula = NA, robust = TRUE) |> 
+  as_tibble() |> 
+  bind_cols(nd["stratum"])
+```
+
+::: callout-note
+
+`fitted()` function by default converts prediction to probability scale, the argument `scale = "linear"` is used so that the prediction stays in logit space.
+
+:::
+
+Next Evans did a big wrangling to combine those estimates and objects we have made into 1 object: `stratum_level`. First we will make a helper function that will extract each object's `Estimate`, `Q2.5` and `Q97.5`,
+
+```{r}
+# helper: keep key + rename the four summary cols with a prefix
+pick <- function(df, prefix) {
+  df |> 
+    transmute(stratum,
+              "{prefix}_est"   := Estimate,
+              "{prefix}_q2.5"  := Q2.5,
+              "{prefix}_q97.5" := Q97.5)
+}
+```
+
+Make the `stratum_level` object:
+
+```{r}
+stratum_level <- d |> 
+  group_by(stratum, sex, race, education, income, age) |> 
+  summarise(HbA1c    = mean(HbA1c),
+            diabetic = mean(diabetic) * 100,
+            strataN  = first(strataN),
+            .groups  = "drop") |> 
+  left_join(model1A_pred |> transmute(stratum, m1Am = Estimate), by = "stratum") |> 
+  left_join(pick(m1Bm_pred, "m1Bm"),  by = "stratum") |> 
+  left_join(pick(m2Bm,      "m2Bm"),  by = "stratum") |> 
+  left_join(pick(m2Bmf,     "m2Bmf"), by = "stratum") |> 
+  left_join(pick(m2Bm_log,  "m2BmL"), by = "stratum")
+
+glimpse(stratum_level)
+```
+
+::: callout-note
+
+- we also compute the empirical summaries for plotting & presenting descriptive statistics later on.
+
+- Notice the .groups = "drop" argument here. This is a handy dplyr feature that ungroups the data directly within summarise(), removing the need to pipe into a separate ungroup() step afterward.
+
+- I don't use the custom function `pick()` on model `model1A_pred`, because Evans later only uses the `Estimate`, so I manually extract the `Estimate` only as seen in this line: `left_join(model1A_pred |> transmute(stratum, m1Am = Estimate), by = "stratum")`.
+
+:::
+
+# Post Processing (VPC AUC) and Some Tables & Figures
+
+## Table 1: Summary Statistics
+
+Let's recreate the table 1 of the paper, this is summary statistics of the data. This involves creating several intermediate tables and then binding them together into the final Table 1. First let's make the total version of the table:
+
+```{r}
+total <- tibble(
+  grp = NA_character_, 
+  Statistic = "Total",
+  N = format(nrow(d), big.mark = ","), 
+  `%` = "100",
+  Mean = "", Median = "", SD = "", Min = "", Max = ""
+)
+
+total
+```
+
+::: callout-note
+
+- The empty strings ("") act as placeholders for empty cells. This ensures the table maintains a consistent column structure, allowing us to safely bind_rows() with other table components later without misalignment.
+
+- `big.mark = ","` this is thousands seperator, it inserts coma each 3 digits
+
+:::
+
+```{r}
+# respecify the levels, because it gets wiped out with pivot_longer()
+lvl <- list(
+  Sex              = c("Male", "Female"),
+  `Race/Ethnicity` = c("White", "Black", "Hispanic"),
+  Education        = c("Less than high school", "High school", "Some college", "College plus"),
+  Income           = c("Low", "Low-mid", "Mid-high", "High"),
+  Age              = c("18-29", "30-44", "45-59", "60+")
+)
+
+t1 <- d |> 
+  dplyr::select(Sex = sex, `Race/Ethnicity` = race, Education = education,
+                Income = income, Age = age) |> 
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(everything(), names_to = "grp", values_to = "Statistic") |> 
+  count(grp, Statistic, name = "N") |> 
+  mutate(grp       = factor(grp, levels = names(lvl)),
+         Statistic = factor(Statistic, levels = unlist(lvl))) |> 
+  arrange(grp, Statistic) |> 
+  mutate(`%` = round(100 * N / nrow(d), 1),
+         N   = format(N, big.mark = ","),
+         `%` = as.character(`%`),
+         Mean = "", Median = "", SD = "", Min = "", Max = "",
+         grp = as.character(grp), Statistic = as.character(Statistic))
+
+t1
+```
+
+::: callout-note
+
+- `count(grp, Statistic, name = "N")` calculates the frequency for each group/statistic combination. The name = "N" argument simply renames the default n column to N.
+
+- Because `pivot_longer()` converted our variables to strings, we lost their natural ordering. We reimpose this by converting grp and Statistic back to factors using our predefined lvl list
+
+- For the statistics, `unlist(lvl)` flattens the list into a single 17-item vector, ensuring the categories sort logically rather than alphabetically.
+
+- Because these factor levels are explicitly defined, `arrange()` automatically sorts the final table rows in the correct sequential order
+
+:::
+
+Alternatively, a custom function can be used to build this part of the table, which is often more practical and less verbose.
+
+```{r}
+#| eval: false
+
+# make a function, we will call it mk_count, and make the table
+mk_count <- function(var, label) 
+  count(d, level = {{var}}) |> 
+  mutate(N = format(n, big.mark = ","), 
+       `%` = as.character(round(100*n/nrow(d), 1)),
+       grp = label,
+       Mean = "", Median = "", SD = "", Min = "", Max = "") |> 
+dplyr::select(grp, Statistic = level, N, `%`, Mean, Median, SD, Min, Max)
+
+# bind the rows manually in order
+t1 <- bind_rows(
+  mk_count(sex, "Sex"),
+  mk_count(race, "Race/Ethnicity"),
+  mk_count(education, "Education"),
+  mk_count(income, "Income"),
+  mk_count(age, "Age")
+)
+
+t1
+```
+
+Now to the HbA1c panel, this is the bottom part of the Evans's table 1,
+
+```{r}
+# make the mk function & make the table
+mk <- function(data, var, label) 
+  data |> summarise(N = n(), 
+                    Mean = mean({{var}}), 
+                    Median = median({{var}}),
+                    SD = sd({{var}}), 
+                    Min = min({{var}}), Max = max({{var}})) |> 
+  mutate(across(where(is.numeric) & !N, function(x) as.character(round(x, digits = 1))),
+         N = format(as.integer(N), big.mark = ","),
+         grp = "HbA1c", 
+         Statistic = label, 
+         `%` = "") |> 
+  dplyr::relocate(grp, Statistic)
+
+# manually bind the rows
+t2 <- bind_rows(
+  mk(d,             HbA1c, "Individual values"),
+  mk(stratum_level, HbA1c, "Observed stratum means"),
+  mk(stratum_level, m1Am,  "Predicted stratum means")
+)
+
+t2
+```
+
+::: callout-note
+
+Notice the use of `dplyr::relocate()` at the end of the pipeline. This function easily moves columns to a specific position in the dataframe. Here, it ensures `grp` and `Statistic` are placed at the front, keeping the structure consistent with `t1` before we bind them together.
+
+:::
+
+notice how we use the values from the null linear model `m1Am` in the `Predicted stratum means`, this is the bottom part of table 1.
+
+Finally assemble all of those into 1 table:
+
+```{r}
+table1 <- bind_rows(total, t1, t2) |> 
+  dplyr::select(grp, Statistic, N, `%`, Mean, Median, SD, Min, Max) |> 
+  as_grouped_data(groups = "grp")
+
+# specify which to indent: level rows have a real Statistic; headers are NA, Total we keep flush
+body_rows <- which(!is.na(table1$Statistic) & table1$Statistic != "Total")
+
+table1 |> 
+  as_flextable(hide_grouplabel = TRUE) |> 
+  padding(i = body_rows, j = "Statistic", padding.left = 25) |> 
+  autofit()
+```
+
+::: callout-note
+
+- The `body_rows` object identifies the row indices for the actual data levels. It filters out the `NA` group headers and the `"Total"` row so they don't get indented.
+
+- We pass these indices to the `padding()` function. The `i` argument specifies which rows to indent, and `j` specifies the column to apply the padding to (in this case, `"Statistic"`).
+
+In short, this pipeline throughout table 1 re-creation creates the grouped table structure and dynamically applies indentation to the subgroup rows.
+
+:::
+
+## Table 2: Calculate stratum-level descriptive statistics
+
+The data wrangling for Table 2 was executed earlier in the [Constructing the strata ID](#constructing-the-strata-id) section. Because a standard frequency tabulation of the 384 strata is difficult to read, we created a threshold summary table there to fulfill this requirement.
+
+## Table 3: Parameter estimates for linear models of HbA1c and logistic models of diabetes
+
+We will use some custom functions here to calculate VPC, AUC, and PCV, instead of using `ROCR` package. We will calculate VPC, AUC, and PCV and make them into a tibble. Finally we will bind them together to make table 3. Let's start from VPC, AUC, PCV.
+
+### VPC, PCV, AUC
+
+We will dive directly into the code; for interpretation of these statistics, please refer to the [Evans et al. 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11059336/) paper.
+
+#### VPC
+
+We will take the posterior draws using `as_draws_df()` and then hand calculate the VPC. Recall that VPC formula is:
+
+$$VPC = \frac{\sigma^2_u}{\sigma^2_u + \sigma^2_e}$$
+
+where $\sigma^2_e = \pi^2 / 3 = 3.29$ for logistic models.
+
+```{r}
+# make the VPC calculating function
+vpc_draws <- function(model, sigma2_e = NULL) {
+  d_draws <- as_draws_df(model)
+  su2 <- d_draws$sd_stratum__Intercept^2
+  se2 <- if (is.null(sigma2_e)) d_draws$sigma^2 else sigma2_e   # 3.29 for logistic
+  su2 / (su2 + se2)                                             # the VPC formula here
+}
+
+# convert into tibble / data frame
+vpc_tbl <- tibble(model = c("1A", "1B", "2A", "2B"),
+                  vpc = list(vpc_draws(model1A),
+                             vpc_draws(model1B),
+                             vpc_draws(model2A, sigma2_e = 3.29),
+                             vpc_draws(model2B, sigma2_e = 3.29))) |> 
+  mutate(qi = map(.x = vpc, .f = function(x) median_qi(x))) |> 
+  unnest(qi) |> 
+  dplyr::select(model, vpc = y, .lower = ymin, .upper = ymax) |> 
+  
+# also make the percentage version of the VPC and CI
+  mutate(vpc_percent = str_c(round(vpc * 100, 1), "%"),
+         ci_percent  = str_glue("[{round(.lower*100, 1)}, {round(.upper*100, 1)}]"))
+
+vpc_tbl 
+```
+
+The value is similar to that of the paper, which uses MLE.
+
+#### PCV
+
+The Proportional Change in Variance (PCV) is calculated as:
+
+$$\text{PCV} = \frac{\sigma_{u(\text{Model A})}^2 - \sigma_{u(\text{Model B})}^2}{\sigma_{u(\text{Model A})}^2}$$
+
+Here, Model A refers to the null models. The PCV represents the proportion of the total between-stratum variance (from the simple intersectional model) that is explained by adjusting for the additive main effects.
+
+Now let's calculate PCV, same workflow as what we've done with VPC: make custom function, calculate the PCV, and make it into a tibble.
+
+```{r}
+# make the PCV calculating function: proportional drop in stratum variance, null -> full
+pcv_draws <- function(null_model, full_model) {
+  su2_null <- as_draws_df(null_model)$sd_stratum__Intercept^2
+  su2_full <- as_draws_df(full_model)$sd_stratum__Intercept^2
+  (su2_null - su2_full) / su2_null                             # the pcv formula here
+}
+
+# convert into tibble
+pcv_tbl <- tibble(pair = c("linear", "logistic"),
+                  model = c("1B", "2B"),                       
+                  pcv = list(pcv_draws(model1A, model1B),
+                             pcv_draws(model2A, model2B))) |> 
+  mutate(qi = map(.x = pcv, .f = function(x) median_qi(x))) |> 
+  unnest(qi) |> 
+  dplyr::select(pair, model, pcv = y, .lower = ymin, .upper = ymax) |> 
+
+# percentage version of PCV and CI
+  mutate(pcv_percent = str_c(round(pcv * 100, 1), "%"),
+         ci_percent  = str_glue("[{round(.lower*100, 1)}, {round(.upper*100, 1)}]"))
+
+pcv_tbl
+```
+
+#### AUC
+
+The `ROCR` package is not particularly tidyverse-friendly, and while the `yardstick` package is an alternative, it includes many other functions that is not used in the MAIHDA workflow. To keep dependencies light, we will write a custom function for the AUC using its rank-based form (the Wilcoxon-Mann-Whitney statistic):
+
+$$U_1 = \left(\sum_{i \in \text{case}} r_i\right) - \frac{n_1(n_1+1)}{2}, \qquad \text{AUC} = \frac{U_1}{n_1 \cdot n_0}$$
+
+Here, $r_i$ is the rank of the $i$-th case. We sum the ranks of all cases and subtract the constant $\frac{n_1(n_1+1)}{2}$. This removes the within-case comparisons, leaving only the case-versus-non-case comparisons needed for the AUC calculation.
+
+```{r}
+# AUC via the rank (Wilcoxon - Mann -Whitney)
+auc <- function(score, label) {
+  label <- as.numeric(label)
+  r <- rank(score)
+  n1 <- sum(label == 1)
+  n0 <- sum(label == 0)
+  (sum(r[label == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+}
+```
+
+Finally make it a tibble.
+
+```{r}
+auc_tbl <- tibble(model = c("2A", "2A", "2B", "2B"),
+                  type  = c("full", "fixed", "full", "fixed"),
+                  notes = c("null model", "null model", "with predictors", "with predictors"),
+                  auc = c(auc(d$m2Axbu_est, d$diabetic),   # 2A, fixed + random
+                          auc(d$m2Axb_est,  d$diabetic),   # 2A, fixed only (floor)
+                          auc(d$m2Bm_est,   d$diabetic),   # 2B, fixed + random
+                          auc(d$m2Bmf_est,  d$diabetic))) |>  # 2B, fixed only
+  mutate(auc_rounded = str_c(round(auc, 2)))
+
+auc_tbl
+```
+
+#### Final Binding
+
+This next chunk is a giant block that pulls out fixed and random effect values, and binds all of these together with the MAIHDA-specific numbers. **Note: This chunk is fully AI-generated**. I haven't yet found a neat way to do this, and I do not understand its inner workings. It is specifically written to make this binding work for this tutorial translation, and is probably not portable to other use cases.
+
+```{r}
+#| warning: false
+#| message: false
+#| code-fold: true
+
+# ================= helpers =================
+get_fixef <- function(model, logistic = FALSE) {
+  fixef(model, robust = TRUE) |> 
+    as_tibble(rownames = "param") |> 
+    mutate(across(.cols = c(Estimate, Q2.5, Q97.5),
+                  .fns  = function(x) if (logistic) exp(x) else x),
+           est = str_c(round(Estimate, 2)),
+           ci  = str_glue("[{round(Q2.5, 2)}, {round(Q97.5, 2)}]")) |> 
+    dplyr::select(param, est, ci)
+}
+
+get_var <- function(model, sd_par) {
+  as_draws_df(model) |> 
+    mutate(v = .data[[sd_par]]^2) |> 
+    median_qi(v) |> 
+    transmute(est = str_c(round(v, 2)),
+              ci  = str_glue("[{round(.lower, 2)}, {round(.upper, 2)}]"))
+}
+
+# ================= fixed effects, joined wide =================
+fixef_all <- get_fixef(model1A) |> rename(`1A_est` = est, `1A_ci` = ci) |> 
+  full_join(get_fixef(model1B) |> rename(`1B_est` = est, `1B_ci` = ci), by = "param") |> 
+  full_join(get_fixef(model2A, logistic = TRUE) |> rename(`2A_est` = est, `2A_ci` = ci), by = "param") |> 
+  full_join(get_fixef(model2B, logistic = TRUE) |> rename(`2B_est` = est, `2B_ci` = ci), by = "param")
+
+# ================= variance rows =================
+v1A_s <- get_var(model1A, "sd_stratum__Intercept"); v1B_s <- get_var(model1B, "sd_stratum__Intercept")
+v2A_s <- get_var(model2A, "sd_stratum__Intercept"); v2B_s <- get_var(model2B, "sd_stratum__Intercept")
+v1A_e <- get_var(model1A, "sigma");                 v1B_e <- get_var(model1B, "sigma")
+
+var_stratum <- tibble(param = "Stratum-Level",
+                      `1A_est` = v1A_s$est, `1A_ci` = v1A_s$ci, `1B_est` = v1B_s$est, `1B_ci` = v1B_s$ci,
+                      `2A_est` = v2A_s$est, `2A_ci` = v2A_s$ci, `2B_est` = v2B_s$est, `2B_ci` = v2B_s$ci)
+
+var_individual <- tibble(param = "Individual-Level",
+                         `1A_est` = v1A_e$est, `1A_ci` = v1A_e$ci, `1B_est` = v1B_e$est, `1B_ci` = v1B_e$ci,
+                         `2A_est` = "", `2A_ci` = "", `2B_est` = "", `2B_ci` = "")
+
+# ================= MAIHDA summary rows =================
+vpc_wide <- vpc_tbl |> transmute(param = "VPC", model, cell = vpc_percent) |> 
+  pivot_wider(names_from = model, values_from = cell, names_glue = "{model}_est") |> 
+  mutate(`1A_ci` = "", `1B_ci` = "", `2A_ci` = "", `2B_ci` = "")
+
+pcv_wide <- pcv_tbl |> transmute(param = "PCV", model, cell = pcv_percent) |> 
+  pivot_wider(names_from = model, values_from = cell, names_glue = "{model}_est") |> 
+  mutate(`1A_est` = "", `2A_est` = "", `1A_ci` = "", `1B_ci` = "", `2A_ci` = "", `2B_ci` = "")
+
+auc_wide <- auc_tbl |> filter(type == "full") |> transmute(param = "AUC", model, cell = auc_rounded) |> 
+  pivot_wider(names_from = model, values_from = cell, names_glue = "{model}_est") |> 
+  mutate(`1A_est` = "", `1B_est` = "", `1A_ci` = "", `1B_ci` = "", `2A_ci` = "", `2B_ci` = "")
+
+# ================= relabel params + assign section/subgroup + order =================
+# map brms coef names -> pretty labels, their subgroup header, and row order
+label_map <- tribble(
+  ~param,                       ~pretty,                 ~subgroup,        ~ord,
+  "Intercept",                  "Intercept",             NA,               1,
+  "sexFemale",                  "Female",                "Sex",            2,
+  "raceBlack",                  "Black Non-Hispanic",    "Race/Ethnicity", 3,
+  "raceHispanic",               "Hispanic/Latino",       "Race/Ethnicity", 4,
+  "educationHighschool",        "Completed high school", "Education",      5,
+  "educationSomecollege",       "Some college no degree","Education",      6,
+  "educationCollegeplus",       "College degree or more","Education",      7,
+  "incomeLowMmid",              "Low-middle",            "Income",         8,
+  "incomeMidMhigh",             "High-middle",           "Income",         9,
+  "incomeHigh",                 "High",                  "Income",         10,
+  "age30M44",                   "30-44 years",           "Age",            11,
+  "age45M59",                   "45-59 years",           "Age",            12,
+  "age60P",                     "60+ years",             "Age",            13,
+  "Stratum-Level",              "Stratum-Level",         NA,               14,
+  "Individual-Level",           "Individual-Level",      NA,               15,
+  "VPC",                        "VPC",                   NA,               16,
+  "PCV",                        "PCV",                   NA,               17,
+  "AUC",                        "AUC",                   NA,               18
+)
+
+body <- bind_rows(fixef_all, var_stratum, var_individual, vpc_wide, pcv_wide, auc_wide) |> 
+  left_join(label_map, by = "param") |> 
+  arrange(ord) |> 
+  mutate(section = case_when(param %in% c("Stratum-Level", "Individual-Level") ~ "Random Effects: Variances",
+                             param %in% c("VPC", "PCV", "AUC")                 ~ "Summary Statistics",
+                             TRUE                                             ~ "Fixed Effects: Regression Coefficients"))
+
+# ================= insert subgroup header rows (Sex, Race, ...) =================
+blank <- function(label) tibble(pretty = label, `1A_est` = "", `1A_ci` = "", `1B_est` = "", `1B_ci` = "",
+                                `2A_est` = "", `2A_ci` = "", `2B_est` = "", `2B_ci` = "",
+                                section = "Fixed Effects: Regression Coefficients", is_sub = TRUE)
+
+# build fixed-effects block with subgroup headers interleaved
+fe <- body |> filter(section == "Fixed Effects: Regression Coefficients") |> mutate(is_sub = FALSE)
+fe_out <- fe |> filter(pretty == "Intercept")
+for (sg in c("Sex", "Race/Ethnicity", "Education", "Income", "Age")) {
+  fe_out <- bind_rows(fe_out, blank(sg), fe |> filter(subgroup == sg))
+}
+
+# reassemble full body: fixed-effects-with-headers + the rest
+rest <- body |> filter(section != "Fixed Effects: Regression Coefficients") |> mutate(is_sub = FALSE)
+table3 <- bind_rows(fe_out, rest) |> 
+  dplyr::select(pretty, `1A_est`, `1A_ci`, `1B_est`, `1B_ci`,
+                `2A_est`, `2A_ci`, `2B_est`, `2B_ci`, section, is_sub) |> 
+  mutate(across(.cols = c(-section, -is_sub), .fns = function(x) replace_na(x, "")))
+
+# ================= render =================
+# rows to indent: the actual coefficient levels (not Intercept, not subgroup headers, not sections)
+indent_rows <- which(!table3$is_sub & !table3$pretty %in%
+                       c("Intercept", "Stratum-Level", "Individual-Level", "VPC", "PCV", "AUC"))
+
+table3 |> 
+  dplyr::select(-is_sub) |> 
+  as_grouped_data(groups = "section") |> 
+  as_flextable(hide_grouplabel = TRUE) |> 
+  set_header_labels(pretty = "",
+                    `1A_est` = "Est", `1A_ci` = "[95% CrI]",
+                    `1B_est` = "Est", `1B_ci` = "[95% CrI]",
+                    `2A_est` = "OR",  `2A_ci` = "[95% CrI]",
+                    `2B_est` = "OR",  `2B_ci` = "[95% CrI]") |> 
+  add_header_row(values = c("", "Linear 1A", "Linear 1B", "Logistic 2A", "Logistic 2B"),
+                 colwidths = c(1, 2, 2, 2, 2)) |> 
+  padding(i = indent_rows, j = "pretty", padding.left = 15) |> 
+  bold(i = ~ !is.na(section), bold = TRUE) |> 
+  autofit()
+```
+
+All of the numbers are similar to that of Evans paper (MLE) with very small differences that can be attributed by the use of MCMC.
+
+# Plots: Visualizing results ranked predicted values
+
+## Figure 1: Visualizing distributions (sample mean, grand mean, and precision weighted grand mean)
+
+Before making the plots, I will load a `ggplot` theme for the plots, I will be using the theme from [Solomon Kurz companion book of Statistical Rethinking chapter 16](https://solomon.quarto.pub/sr2/16.html), let's load the theme.
+
+```{r}
+library(ggthemes)
+
+theme_set(
+  theme_base(base_size = 12) +
+    theme(text = element_text(family = "Times"),
+          axis.text = element_text(family = "Times"),
+          axis.ticks = element_line(linewidth = 0.25),
+          axis.ticks.length = unit(0.1, "cm"),
+          panel.background = element_rect(fill = "white", linewidth = 0.1),
+          plot.background = element_blank(),
+          strip.background = element_blank()
+          )
+  )
+```
+
+Now let's make the plot, and then combine these plots together using `patchwork` to make figure 1 of Evans paper.
+
+```{r}
+# annotation tibble: one row per label
+text <- tibble(x     = c(53, 11, 80),
+               y     = c(0.10, 0.01, 0.01),
+               label = c("Sample Mean = 40.2 mmol / mol",
+                         "Min = 10.3 mmol / mol",
+                         "Max = 101.2 mmol / mol"))
+
+p1 <- d |> 
+  ggplot(aes(x = HbA1c)) +
+  geom_histogram(aes(y = after_stat(count / sum(count))),
+                 binwidth = 2, boundary = 22,
+                 color = "white", fill = "grey67", linewidth = 1/4) +
+  annotate("segment", x = 40.80, xend = 40.80, y = 0, yend = 0.097,
+         linewidth = 0.6) +
+  geom_text(data = text,
+            aes(x = x, y = y, label = label),
+            family = "Times", size = 3) +
+  scale_y_continuous("Percent of Individuals", labels = scales::percent) +
+  xlab("HbA1c")
+
+p1
+```
+
+```{r}
+# Panel B — observed stratum means
+text_b <- tibble(x     = c(45, 25, 52),
+                 y     = c(0.28, 0.02, 0.02),
+                 label = c("Grand Mean = 40.8 mmol/mol",
+                           "Min =\n23.5 mmol/mol",
+                           "Max =\n53.8 mmol/mol"))
+
+p2 <- stratum_level |> 
+  ggplot(aes(x = HbA1c)) +
+  geom_histogram(aes(y = after_stat(count / sum(count))),
+                 binwidth = 2, boundary = 22,
+                 color = "white", fill = "grey67", linewidth = 1/4) +
+  annotate("segment", x = 40.80, xend = 40.80, y = 0, yend = 0.26,
+         linewidth = 0.6)  +
+  geom_text(data = text_b,
+            aes(x = x, y = y, label = label),
+            family = "Times", size = 3) +
+  scale_y_continuous("Percent of Strata", labels = scales::percent) +
+  xlab("HbA1c") +
+  coord_cartesian(xlim = c(15, 60))
+
+p2
+```
+
+```{r}
+# Panel C — predicted stratum means (model 1A)
+text_c <- tibble(x     = c(43.2, 34, 48.2),
+                 y     = c(0.29, 0.03, 0.03),
+                 label = c("Precision Weighted Grand Mean = 40.8 mmol/mol",
+                           "Min =\n34.2 mmol/mol",
+                           "Max =\n48.1 mmol/mol"))
+
+p3 <- stratum_level |> 
+  ggplot(aes(x = m1Am)) +
+  geom_histogram(aes(y = after_stat(count / sum(count))),
+                 binwidth = 2, boundary = 22,
+                 color = "white", fill = "grey67", linewidth = 1/4) +
+  annotate("segment", x = 40.80, xend = 40.80, y = 0, yend = 0.27,
+         linewidth = 0.6)  +
+  geom_text(data = text_c,
+            aes(x = x, y = y, label = label),
+            family = "Times", size = 3) +
+  scale_y_continuous("Percent of Strata", labels = scales::percent) +
+  xlab("Predicted HbA1c") + 
+  coord_cartesian(xlim = c(15, 60))
+
+p3
+```
+
+::: callout-note
+
+Notice how instead of using `vline` we use `annotate()` to manually draw a vertical line with custom coordinates.
+
+:::
+
+Now it's time to combine with patchwork.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 9
+
+library(patchwork)
+
+p1 / p2 / p3
+```
+
+## Table 4 and Figure 2: Range and Distribution of Predicted Values & Caterpillar Plot
+
+As Evans et al. (2024) noted, because additive main effects can obscure key differences between strata, it is crucial to examine the actual range of predicted values across intersectional strata. We can visualize this by ranking the predicted values in caterpillar plots (Figure 2) and by creating tables of the highest and lowest-ranking strata (Table 4). To do this, we will rework the `stratum_level` object we created earlier, which contains the model outputs for all 384 strata.
+
+### Table 4: Ranking Table
+
+```{r}
+# ---- setup: ranks, percent conversions, helper (run once) ----
+stratum_level <- stratum_level |> 
+  mutate(rank_1B    = rank(m1Bm_est),
+         rank_2B    = rank(m2Bm_est),
+         percent_2B     = m2Bm_est   * 100,
+         percent_2B_lower  = m2Bm_q2.5  * 100,
+         percent_2B_upper  = m2Bm_q97.5 * 100)
+
+# helper function
+top_bottom <- function(data, rank_col, n = 5) {
+  bind_rows(data |> slice_min(order_by = {{ rank_col }}, n = n) |> mutate(grp = "lowest"),
+            data |> slice_max(order_by = {{ rank_col }}, n = n) |> mutate(grp = "highest"))
+}
+```
+
+```{r}
+glimpse(stratum_level)
+```
+
+```{r}
+# ---- build display frame: 5 lowest + 5 highest by rank_1B ----
+table4_1B <- stratum_level |> 
+  mutate(pred = round(m1Bm_est, 1),
+         ci   = str_glue("[{round(m1Bm_q2.5, 1)}, {round(m1Bm_q97.5, 1)}]")) |> 
+  top_bottom(rank_1B, n = 5) |> 
+  arrange(rank_1B) |> 
+  mutate(grp = if_else(grp == "lowest", "5 Lowest", "5 Highest"),
+         grp = factor(grp, levels = c("5 Lowest", "5 Highest"))) |> 
+  dplyr::select(grp,
+                Rank = rank_1B, Stratum = stratum,
+                Sex = sex, Race = race, Education = education,
+                Income = income, Age = age, n = strataN,
+                `Predicted Mean HbA1c` = pred, `Approximate 95% CI` = ci)
+
+# Check what we have done
+glimpse(table4_1B)
+```
+
+Render with `flextable` with the same grouping logic we did with table 1.
+
+```{r}
+table4_1B |> 
+  as_grouped_data(groups = "grp") |> 
+  as_flextable(hide_grouplabel = TRUE) |> 
+  add_header_lines(values = "Predicted Mean HbA1c (Model 1B)") |> 
+  align(i = 1, part = "header", align = "left") |> 
+  autofit()
+```
+
+::: callout-note
+
+- We use `add_header_lines()` to insert a standalone title row at the top of the flextable.
+
+- The subsequent `align()` function ensures this new title row is left-aligned rather than centered.
+
+:::
+
+Now let's make the ranking table of the logistic model `model2B`.
+
+```{r}
+# ---- build display frame: 5 lowest + 5 highest by rank_2B ----
+table4_2B <- stratum_level |> 
+  mutate(pred = round(percent_2B, 1),
+         ci   = str_glue("[{round(percent_2B_lower, 1)}, {round(percent_2B_upper, 1)}]")) |> 
+  top_bottom(rank_2B, n = 5) |> 
+  arrange(rank_2B) |> 
+  mutate(grp = if_else(grp == "lowest", "5 Lowest", "5 Highest"),
+         grp = factor(grp, levels = c("5 Lowest", "5 Highest"))) |> 
+  dplyr::select(grp,
+                Rank = rank_2B, Stratum = stratum,
+                Sex = sex, Race = race, Education = education,
+                Income = income, Age = age, n = strataN,
+                `Predicted % Diabetic` = pred, `Approximate 95% CI` = ci)
+
+# check what we did:
+glimpse(table4_2B)
+```
+
+```{r}
+table4_2B |> 
+  as_grouped_data(groups = "grp") |> 
+  as_flextable(hide_grouplabel = TRUE) |> 
+  add_header_lines(values = "Predicted Percentage Diabetic (Model 2B)") |> 
+  align(i = 1, part = "header", align = "left") |> 
+  autofit()
+```
+
+### Figure 2: Caterpillar Plot
+
+The code for this figure closely follows Evans' original tutorial, with minor modifications to the `ggplot2` theme and the addition of a `patchwork` pipeline to combine the panels.
+
+```{r}
+p1a <- ggplot(stratum_level, aes(y = m1Bm_est, x = rank_1B)) + 
+  geom_point() +
+  geom_pointrange(aes(ymin = m1Bm_q2.5, ymax = m1Bm_q97.5)) +
+  ylab("Predicted HbA1c, Model 1B") +
+  xlab("Stratum Rank") +
+  # re-add horizontal gridline
+  theme(panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85")) +
+  # custom x breaks
+  scale_x_continuous(breaks = c(1, 50, 100, 150, 200, 250, 300, 350, 384))
+```
+
+Model 2b plot,
+
+```{r}
+p2a <- ggplot(stratum_level, aes(y = percent_2B, x = rank_2B)) +
+  geom_pointrange(aes(ymin = percent_2B_lower, ymax = percent_2B_upper)) +
+  ylab("Predicted Percent Diabetic, Model 2B") +
+  xlab("Stratum Rank") +
+  theme(panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85")) +
+  scale_x_continuous(breaks = c(1, 50, 100, 150, 200, 250, 300, 350, 384))
+```
+
+now let's add the captions with `ggtitle()` then combine with patchwork:
+
+```{r}
+p1a <- p1a + ggtitle("(A) Predicted HbA1c, Linear Model 1B")
+p2a <- p2a + ggtitle("(B) Predicted Percent Diabetic (HbA1c ≥ 48 mmol/mol), Logistic Model 2B")
+
+p1a / p2a
+```
+
+## Figure 3: Caterpillar Plots of Stratum Random Effects
+
+Let's start with the `model1B` caterpillar plot, first make it into a tibble,
+
+```{r}
+m1Bu <- ranef(model1B, robust = TRUE)$stratum |> 
+  as_tibble(rownames = "stratum") |> 
+  rename(est = Estimate.Intercept,
+         .lower  = Q2.5.Intercept,
+         .upper  = Q97.5.Intercept) |> 
+  mutate(rank = rank(est))
+
+glimpse(m1Bu)
+```
+
+::: callout-note
+
+By default, `ranef()` returns an array where the stratum IDs are stored as row names. Using `as_tibble(rownames = "stratum")` extracts these IDs from the row names into a proper column, making them accessible for plotting and joining.
+
+:::
+
+```{r}
+p1b <- ggplot(m1Bu, aes(x = rank, y = est)) +
+  geom_point() +
+  geom_segment(aes(y = .lower, yend = .upper, xend = rank)) +
+  xlab("Stratum Rank") +
+  ylab("Predicted Stratum Random Effect in HbA1c (mmol/mol)") +
+  # re-add horizontal gridline
+  theme(panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85")) +
+  # custom x breaks
+  scale_x_continuous(breaks = c(1, 50, 100, 150, 200, 250, 300, 350, 384))
+
+p1b
+```
+
+As an alternative visualization option highlighted by Evans, the second panel plots only the strata with significant random effects. To do this, we filter the `m1Bu` tibble to exclude any strata whose 95% credible intervals cross zero, and then plot the remaining results.
+
+```{r}
+# wrangle to filter to strata whose 95% CI excludes 0
+m1Bu_sig <- m1Bu |> 
+  mutate(cross_0 = case_when(.lower > 0 & .upper > 0 ~ "95% Above 0",
+                             .lower < 0 & .upper < 0 ~ "95% Below 0",
+                             TRUE                    ~ "Crosses 0")) |> 
+  filter(cross_0 != "Crosses 0")
+
+# caterpillar of only the significant random effects, labeled by stratum ID
+p2b <- ggplot(m1Bu_sig, aes(x = rank(est), y = est, label = stratum)) +
+  geom_pointrange(aes(ymin = .lower, ymax = .upper)) +
+  geom_hline(yintercept = 0, color = "grey10", linewidth = 1) +
+  geom_text(hjust = 0, vjust = 5, size = 3) +
+  xlab("Stratum Rank") +
+  ylab("Predicted Stratum Random Effect in HbA1c (mmol/mol)") + 
+  theme(panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85")) +
+  scale_x_continuous(breaks = NULL)
+
+p2b
+```
+
+For the final panel, we visualize the logistic model's interaction effects directly in probability space. This plot shows the difference between the total predicted probability for a given stratum $j$ and the probability based solely on its additive main effects:
+
+$$\pi^B_j = \pi_j - \pi^A_j$$
+
+Where:
+
+- $\pi_j$: The total predicted probability in stratum $j$.
+
+- $\pi^A_j$: The predicted probability based on additive main effects only.
+
+- $\pi^B_j$: The resulting difference, representing the interaction effect (or stratum-specific random effect) converted into probability space.
+
+Instead of extracting the posterior draws manually and calculating the differences by hand like in the original Evans code, we use `add_epred_draws()` from the `tidybayes` package. This function directly samples predictions on the outcome scale for our specified new data (`nd_p3b`) and returns them in a long-format dataframe. 
+
+This approach offers two major advantages:
+
+1. It eliminates the need to manually specify regression coefficients and calculate expectations by hand.
+2. It avoids the extra data wrangling (such as `pivot_longer()`) typically required when extracting draws using `brms::fitted()`.
+
+```{r}
+# wrangle with add_epred_draws() from tidybayes
+nd_p3b <- distinct(stratum_level, stratum, sex, race, education, income, age)
+
+p3b_data <- nd_p3b |> 
+  add_epred_draws(model2B, re_formula = NULL) |>      # π_j: full (with ranef)
+  rename(pi_full = .epred) |> 
+  left_join(nd_p3b |> 
+              add_epred_draws(model2B, re_formula = NA) |>   # π_j^A: additive only
+              rename(pi_add = .epred),
+            by = c("stratum", "sex", "race", "education", "income", "age", ".draw")) |> 
+  mutate(interaction = (pi_full - pi_add) * 100) |>   # difference, per draw, as percentage points
+  group_by(stratum) |> 
+  median_qi(interaction) |> 
+  mutate(rank = rank(interaction))
+
+# see what we did:
+glimpse(p3b_data)
+```
+
+```{r}
+p3b <- ggplot(p3b_data, aes(x = rank, y = interaction)) +
+  geom_pointrange(aes(ymin = .lower, ymax = .upper)) +
+  geom_hline(yintercept = 0, color = "grey10", linewidth = 1) +
+  xlab("Stratum Rank") +
+  ylab("Interaction Effect on Predicted % Diabetic (Model 2B)") +
+  theme(panel.grid.major.y = element_line(linewidth = 0.25, color = "grey85")) +
+  scale_x_continuous(breaks = c(1, 50, 100, 150, 200, 250, 300, 350, 384))
+
+p3b
+```
+
+Since Evans presents these as alternative visualization options rather than a required step in the MAIHDA workflow, we leave them as standalone figures. If you wish to combine them into a single panel, you can apply the same `patchwork` syntax used earlier (e.g., `p1a / p2a`) and add individual titles using `ggtitle()`.
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
