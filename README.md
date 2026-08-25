@@ -1,6 +1,6 @@
 # Doing MAIHDA with Tidyverse & brms
 
-This repository contains my personal notes, tidied up and edited a bit, from Evans's MAIHDA (Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy) code tutorial, with the code translated into `tidyverse` syntax. The original code tutorial is supplementary material to the [2024 MAIHDA methodological paper by Evans et al.](https://pmc.ncbi.nlm.nih.gov/articles/PMC11059336/), and this repository is intended to be read alongside the original paper. For reference, [the original tutorial code by Evans et al.](https://osf.io/dtvc3/files/xvtu6) is also available for comparison.
+This repository is a `tidyverse` translation of Evans's MAIHDA (Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy) code tutorial, based on my personal notes, tidied up and edited a bit. The original code tutorial is supplementary material to the [2024 MAIHDA methodological paper by Evans et al.](https://pmc.ncbi.nlm.nih.gov/articles/PMC11059336/), and this repository is intended to be read alongside that paper. For reference, the original tutorial code by Evans et al. is also available [here](https://osf.io/dtvc3/files/xvtu6) for comparison.
 
 # Contents
 
